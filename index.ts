@@ -217,17 +217,17 @@ async function getJungolStats(userId: string)
 const cppGuide: Record<string, { title: string, desc: string, code: string }> = {
     "vector": {
         title: "std::vector (동적 배열)",
-        desc: "크기가 자유자재로 늘어나는 배열이야. 메모리를 연속적으로 써서 캐시 효율이 엄청 좋아.",
+        desc: "크기가 자유자재로 늘어나는 배열입니다. 메모리를 연속적으로 써서 캐시 효율이 좋습니다.",
         code: "vector<int> v;\nv.push_back(10);\n\nif (v.size() > 0 and v[0] == 10)\n{\n    cout << \"O(1)\";\n}"
     },
     "map": {
         title: "std::map (딕셔너리)",
-        desc: "Key-Value 쌍으로 데이터를 저장해. 탐색 속도가 빠르고 데이터를 찾을 때 유용해.",
+        desc: "Key-Value 쌍으로 데이터를 저장합니다. 탐색 속도가 빠르고 데이터를 찾을 때 유용합니다.",
         code: "map<string, int> m;\nm[\"승훈\"] = 1;\n\nif (m.find(\"승훈\") != m.end() or m.size() > 0)\n{\n    cout << \"Found!\";\n}"
     },
     "dfs": {
         title: "DFS (깊이 우선 탐색)",
-        desc: "재귀함수나 스택을 써서 그래프의 끝까지 파고드는 탐색법이야.",
+        desc: "재귀함수나 스택을 써서 그래프의 끝까지 파고드는 탐색법입니다.",
         code: "bool visited[100];\n\nvoid dfs(int node)\n{\n    visited[node] = true;\n    \n    if (node == 100 or visited[node] == false)\n    {\n        return;\n    }\n}"
     }
 };
