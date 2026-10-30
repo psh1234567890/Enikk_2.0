@@ -1,5 +1,6 @@
 import { Client, GatewayIntentBits, EmbedBuilder, Events, type Message } from "discord.js";
 import axios from "axios";
+import { fetchJungolProfile, normalizeJungolIdentifier } from "./jungol.js";
 import { createClient } from "@supabase/supabase-js";
 import * as dotenv from "dotenv";
 import {
@@ -136,22 +137,6 @@ async function solvedTier(handle: string | null): Promise<string | null> {
     });
     if (!Number.isInteger(response.data.tier)) throw new Error("solved.ac 티어 데이터 형식 오류");
     return tierName(response.data.tier);
-}
-
-async function jungolInfo(id: string | null): Promise<{ tier: string; rank: string; total: string } | null> {
-    if (!id || !/^[A-Za-z0-9_]{1,40}$/.test(id) || id.toLowerCase() === "none") return null;
-    const response = await http.get<string>("https://jungol.co.kr/account/" + encodeURIComponent(id));
-    if (typeof response.data !== "string") return null;
-    const html = response.data;
-    const rawRank = /rank:(\d+)/.exec(html)?.[1];
-    const rawTier = /tier:(\d+)/.exec(html)?.[1];
-    const rawTotal = /<h2[^>]*>[\s\S]*?(\d+)\s*문제[\s\S]*?<\/h2>/.exec(html)?.[1]
-        ?? /<!--\[-->(\d+)\s*문제<!--\]-->/.exec(html)?.[1];
-    return {
-        tier: rawTier ? tierName(Number(rawTier)) : "확인 불가",
-        rank: rawRank ? rawRank + "위" : "확인 불가",
-        total: rawTotal ?? "확인 불가"
-    };
 }
 
 async function recommendation(handle: string | null): Promise<string> {
@@ -306,21 +291,33 @@ client.on(Events.MessageCreate, async (message: Message) => {
         if (cmd.name === "!조회") {
             const [tierResult, jungolResult] = await Promise.allSettled([
                 solvedTier(student.baekjoon_id),
-                jungolInfo(student.jungol_id)
+                fetchJungolProfile(student.jungol_id)
             ]);
             const tier = tierResult.status === "fulfilled" && tierResult.value
                 ? tierResult.value : "실시간 확인 실패 (저장값: " + display(student.solved_ac_tier) + ")";
             const jungol = jungolResult.status === "fulfilled" ? jungolResult.value : null;
+            const jgLive = jungol && jungol.status !== "unavailable"
+                ? (jungol.tier ?? "티어 확인 불가")
+                    + (jungol.rank !== null ? " · " + jungol.rank + "위" : " · 순위 없음")
+                : "실시간 확인 실패"
+                    + (student.jungol_tier && student.jungol_tier !== "Unknown"
+                        ? " (DB 저장값: " + display(student.jungol_tier) + ")" : "");
             const bjLink = student.baekjoon_id && isSafeHandle(student.baekjoon_id)
                 ? "https://solved.ac/profile/" + encodeURIComponent(student.baekjoon_id) : "미등록";
-            const jgLink = student.jungol_id && isSafeHandle(student.jungol_id)
-                ? "https://jungol.co.kr/account/" + encodeURIComponent(student.jungol_id) : "미등록";
+            const linkedJungolId = normalizeJungolIdentifier(student.jungol_id);
+            const jgLink = jungol?.accountId
+                ? "https://jungol.co.kr/account/" + jungol.accountId
+                : linkedJungolId
+                    ? /^\d+$/.test(linkedJungolId)
+                        ? "https://jungol.co.kr/account/" + linkedJungolId
+                        : "https://jungol.co.kr/@" + encodeURIComponent(linkedJungolId)
+                    : "미등록";
             const embed = new EmbedBuilder().setColor(0x3b82f6)
                 .setTitle("O(1) 프로필: " + display(student.name))
                 // 나이·성별·학번 등 불필요한 개인정보는 Discord에 표시하지 않는다.
                 .addFields(
                     { name: "백준 (solved.ac)", value: tier + "\n" + bjLink },
-                    { name: "정올 (JUNGOL)", value: (jungol ? jungol.tier + " · " + jungol.rank : "조회 불가/미등록") + "\n" + jgLink }
+                    { name: "정올 (JUNGOL)", value: jgLive + "\n" + jgLink }
                 )
                 .setFooter({ text: "외부 API 오류는 저장된 DB 티어와 구분해 표시합니다." });
             await pending.edit({ content: "조회 완료.", embeds: [embed] });
@@ -344,15 +341,18 @@ client.on(Events.MessageCreate, async (message: Message) => {
         if (cmd.name === "!통계") {
             const [bj, jg] = await Promise.allSettled([
                 solvedStats(student.baekjoon_id),
-                jungolInfo(student.jungol_id)
+                fetchJungolProfile(student.jungol_id)
             ]);
             const solved = bj.status === "fulfilled" ? bj.value : apiFailure(bj.reason);
-            const jungol = jg.status === "fulfilled" && jg.value ? jg.value.total : "확인 불가";
+            const jungol = jg.status === "fulfilled" ? jg.value : null;
+            const jungolText = jungol?.solvedCount !== null && jungol?.solvedCount !== undefined
+                ? String(jungol.solvedCount) + "문제"
+                : "확인 불가 (" + (jungol?.error ?? "정올 요청 실패") + ")";
             const embed = new EmbedBuilder().setColor(0xa855f7)
                 .setTitle(display(student.name) + " 풀이 통계")
                 .addFields(
                     { name: "백준", value: solved },
-                    { name: "정올", value: "확인된 해결 문제: " + jungol }
+                    { name: "정올", value: "확인된 해결 문제: " + jungolText }
                 );
             await pending.edit({ content: "통계 조회 결과", embeds: [embed] });
         }

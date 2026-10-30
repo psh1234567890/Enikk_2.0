@@ -1,11 +1,11 @@
 {
     "name":  "enikk2.0",
-    "version":  "2.1.0",
+    "version":  "2.1.1",
     "type":  "module",
     "description":  "O(1) club Discord bot: controlled student lookup, recommendations and coding guidance",
     "main":  "index.js",
     "scripts":  {
-                    "test":  "npm run build \u0026\u0026 node --test dist/logic.test.js",
+                    "test":  "npm run build \u0026\u0026 node --test dist/*.test.js",
                     "typecheck":  "tsc --noEmit -p tsconfig.json",
                     "build":  "tsc -p tsconfig.json",
                     "dev":  "npm run build \u0026\u0026 npm run start",
