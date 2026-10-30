@@ -3,11 +3,22 @@ import axios from "axios";
 import { fetchJungolProfile, normalizeJungolIdentifier } from "./jungol.js";
 import { createClient } from "@supabase/supabase-js";
 import * as dotenv from "dotenv";
+import { acquireInstanceLock, DuplicateInstanceError } from "./single-instance.js";
 import {
     buildSearchUrl, chooseRandom, isSafeHandle, isAuthorizedSensitiveMessage, parseCommand,
     recommendationRank, tierName, tierScore
 } from "./logic.js";
 
+let instanceLock: (() => void);
+try {
+    instanceLock = acquireInstanceLock(new URL("../.enikk2.pid", import.meta.url));
+} catch (error) {
+    if (error instanceof DuplicateInstanceError) {
+        console.error(error.message);
+        process.exit(0);
+    }
+    throw error;
+}
 dotenv.config();
 
 function requiredEnv(name: string): string {

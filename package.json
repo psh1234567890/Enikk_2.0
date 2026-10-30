@@ -1,6 +1,6 @@
 {
     "name":  "enikk2.0",
-    "version":  "2.1.1",
+    "version":  "2.1.2",
     "type":  "module",
     "description":  "O(1) club Discord bot: controlled student lookup, recommendations and coding guidance",
     "main":  "index.js",
