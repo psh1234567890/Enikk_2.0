@@ -8,6 +8,8 @@
 .env.development
 .env.test
 .env.production
+.env.*
+!.env.example
 *.pem
 
 # 2. Node.js 패키지 및 빌드 찌꺼기

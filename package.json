@@ -1,24 +1,30 @@
 {
-  "name": "enikk2.0",
-  "version": "1.0.0",
-  "type": "module",
-  "description": "",
-  "main": "index.js",
-  "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
-  },
-  "keywords": [],
-  "author": "",
-  "license": "ISC",
-  "dependencies": {
-    "@supabase/supabase-js": "^2.105.3",
-    "axios": "^1.16.0",
-    "discord.js": "^14.26.4",
-    "dotenv": "^17.4.2"
-  },
-  "devDependencies": {
-    "@types/node": "^25.6.0",
-    "ts-node": "^10.9.2",
-    "typescript": "^6.0.3"
-  }
+    "name":  "enikk2.0",
+    "version":  "2.1.0",
+    "type":  "module",
+    "description":  "O(1) club Discord bot: controlled student lookup, recommendations and coding guidance",
+    "main":  "index.js",
+    "scripts":  {
+                    "test":  "npm run build \u0026\u0026 node --test dist/logic.test.js",
+                    "typecheck":  "tsc --noEmit -p tsconfig.json",
+                    "build":  "tsc -p tsconfig.json",
+                    "dev":  "npm run build \u0026\u0026 npm run start",
+                    "start":  "node dist/index.js"
+                },
+    "keywords":  [
+
+                 ],
+    "author":  "",
+    "license":  "ISC",
+    "dependencies":  {
+                         "@supabase/supabase-js":  "^2.105.3",
+                         "axios":  "^1.16.0",
+                         "discord.js":  "^14.26.4",
+                         "dotenv":  "^17.4.2"
+                     },
+    "devDependencies":  {
+                            "@types/node":  "^25.6.0",
+                            "ts-node":  "^10.9.2",
+                            "typescript":  "^6.0.3"
+                        }
 }

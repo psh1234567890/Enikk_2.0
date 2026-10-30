@@ -1,406 +1,376 @@
-console.log('--- 에닉(Enik) 2.0 가동 준비 ---');
-
-import { Client, GatewayIntentBits, EmbedBuilder } from 'discord.js';
-import axios from 'axios';
-import { createClient } from '@supabase/supabase-js';
-import * as dotenv from 'dotenv';
-import https from 'https'; // ✨ 범인 1 해결: 최신 문법으로 https 모듈 소환!
+import { Client, GatewayIntentBits, EmbedBuilder, Events, type Message } from "discord.js";
+import axios from "axios";
+import { createClient } from "@supabase/supabase-js";
+import * as dotenv from "dotenv";
+import {
+    buildSearchUrl, chooseRandom, isSafeHandle, isAuthorizedSensitiveMessage, parseCommand,
+    recommendationRank, tierName, tierScore
+} from "./logic.js";
 
 dotenv.config();
 
-// ✨ 범인 2 해결: 솔브닥 방화벽을 뚫기 위한 전역 명찰(User-Agent) 부착! ✨
-// 이렇게 해두면 앞으로 axios가 쏘는 모든 요청에 당당하게 에닉의 이름표가 붙습니다.
-axios.defaults.headers.common['User-Agent'] = 'O(1)_Club_Bot/2.0 (Contact: SeungHoon)';
+function requiredEnv(name: string): string {
+    const value = process.env[name]?.trim();
+    if (!value) throw new Error("환경 변수 누락: " + name);
+    return value;
+}
 
-const DISCORD_TOKEN = process.env.DISCORD_TOKEN || "여기에_디스코드_봇_토큰_입력";
-const SUPABASE_URL = process.env.SUPABASE_URL || "https://yxukggorpqsrwurbamxv.supabase.co";
-const SUPABASE_KEY = process.env.SUPABASE_KEY || "여기에_Supabase_Anon_Key_입력";
+const discordToken = requiredEnv("DISCORD_TOKEN");
+const supabaseUrl = requiredEnv("SUPABASE_URL");
+const supabaseKey = requiredEnv("SUPABASE_KEY");
+const clubAccessKey = requiredEnv("O1_DB_ACCESS_KEY");
 
-const supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
+// 서버/채널을 지정하지 않으면 학생 개인정보 조회 명령은 모두 차단한다.
+const allowedGuildId = process.env.O1_GUILD_ID?.trim() ?? "";
+const allowedChannelIds = new Set(
+    (process.env.O1_ALLOWED_CHANNEL_IDS ?? "").split(",").map(x => x.trim()).filter(Boolean)
+);
+const configuredAccess = Boolean(allowedGuildId && allowedChannelIds.size > 0);
+if (!configuredAccess) {
+    console.warn("[보안] O1_GUILD_ID / O1_ALLOWED_CHANNEL_IDS 미설정: 개인정보 조회 명령 비활성화");
+}
 
+const supabase = createClient(supabaseUrl, supabaseKey, {
+    global: { headers: { "x-o1-club-key": clubAccessKey } }
+});
 const client = new Client({
-    intents: [
-        GatewayIntentBits.Guilds,
-        GatewayIntentBits.GuildMessages,
-        GatewayIntentBits.MessageContent,
-    ],
+    intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessages, GatewayIntentBits.MessageContent],
+    allowedMentions: { parse: [] }
 });
 
-// --- [유틸리티 함수] ---
+const http = axios.create({
+    timeout: 8500,
+    headers: { "User-Agent": "O1_Club_Bot/2.0" }
+});
 
-function convertTier(level: number): string 
-{
-    if (level <= 0) return "Unrated";
-    const colors = ["Bronze", "Silver", "Gold", "Platinum", "Diamond", "Ruby", "Master"];
-    const colorIdx = Math.floor((level - 1) / 5);
-    const rank = 5 - ((level - 1) % 5);
-    if (colorIdx > 5) return "Master";
-    return `${colors[colorIdx]} ${rank}`;
-}
+type Student = {
+    student_id: number;
+    name: string | null;
+    baekjoon_id: string | null;
+    solved_ac_tier: string | null;
+    jungol_id: string | null;
+    jungol_tier: string | null;
+};
 
-function shuffleArray(array: any[]) 
-{
-    for (let i = array.length - 1; i > 0; i--) 
-    {
-        const j = Math.floor(Math.random() * (i + 1));
-        [array[i], array[j]] = [array[j], array[i]];
-    }
-    return array;
-}
+type SolvedProblem = { problemId: number; titleKo: string; level: number };
+type SearchResponse = { count: number; items: SolvedProblem[] };
+type TierResponse = { tier: number };
+type StatResponse = { level: number; solved: number }[];
 
-// 1. 정올 크롤링 (프로필 정보)
-async function scrapeJungolProfile(userId: string) 
-{
-    if (!userId || userId === 'None') return null;
-    try 
-    {
-        const url = `https://jungol.co.kr/account/${userId}`;
-        // require 대신 import한 https를 사용!
-        const httpsAgent = new https.Agent({ rejectUnauthorized: false });
-        const response = await axios.get(url, { httpsAgent });
-        const html = response.data;
-
-        const rankMatch = html.match(/rank:(\d+)/);
-        const tierMatch = html.match(/tier:(\d+)/);
-
-        if (rankMatch && tierMatch) 
-        {
-            const rank = parseInt(rankMatch[1], 10);
-            const tierVal = parseInt(tierMatch[1], 10);
-            return {
-                rankStr: `${rank}위`,
-                tierStr: convertTier(tierVal)
-            };
-        }
-        return null;
-    } 
-    catch (error: any) 
-    {
-        console.error(`[에러] 정올 크롤링 실패 (${userId}):`, error.message);
-        return null;
-    }
-}
-
-// 2. 백준 티어 API
-async function getSolvedAcTier(handle: string) 
-{
-    if (!handle || handle === 'None') return "미연동";
-    try 
-    {
-        const url = `https://solved.ac/api/v3/user/show?handle=${handle}`;
-        const response = await axios.get(url);
-        return convertTier(response.data.tier);
-    } 
-    catch (error: any) 
-    {
-        console.error(`[에러] 백준 티어 조회 실패 (${handle}):`, error.message);
-        return "미연동 또는 오류";
-    }
-}
-
-// 3. 백준 맞춤 문제 추천 엔진
-async function getRecommendedProblems(handle: string) 
-{
-    if (!handle || handle === 'None') return "백준 아이디가 등록되지 않았습니다.";
-    
-    try 
-    {
-        const url = `https://solved.ac/api/v3/search/problem?query=solved_by%3A${handle}&sort=level&direction=desc`;
-        const res = await axios.get(url);
-        const totalSolved = res.data.count;
-
-        if (totalSolved === 0) return "푼 문제가 없어 추천이 불가능합니다.";
-
-        const targetRank = Math.min(totalSolved - 1, 10);
-        const page = Math.floor(targetRank / 20) + 1;
-        let itemIdx = targetRank % 20;
-
-        const pagedUrl = `${url}&page=${page}`;
-        const pagedRes = await axios.get(pagedUrl);
-        let items = pagedRes.data.items;
-
-        if (items.length <= itemIdx) itemIdx = items.length - 1;
-        let medianLevel = items[itemIdx].level;
-
-        let recUrl = `https://solved.ac/api/v3/search/problem?query=tier%3A${medianLevel}%20-solved_by%3A${handle}`;
-        let recRes = await axios.get(recUrl);
-        let recItems = recRes.data.items;
-
-        if (recItems.length === 0) 
-        {
-            medianLevel++;
-            recUrl = `https://solved.ac/api/v3/search/problem?query=tier%3A${medianLevel}%20-solved_by%3A${handle}`;
-            recRes = await axios.get(recUrl);
-            recItems = recRes.data.items;
-        }
-
-        if (recItems.length === 0) return "추천할 만한 문제를 찾지 못했습니다.";
-
-        shuffleArray(recItems);
-        const selected = recItems.slice(0, 5);
-
-        let result = `**주력 구간: ${convertTier(medianLevel)}**\n\n`;
-        for (const prob of selected) 
-        {
-            result += `[${prob.problemId}] ${prob.titleKo} (${convertTier(prob.level)})\n`;
-        }
-        return result;
-    } 
-    catch (error: any) 
-    {
-        console.error("[추천 에러]", error.message);
-        return "문제 분석 중 오류가 발생했습니다. (방화벽 차단 등)";
-    }
-}
-
-// 4. 백준 티어별 푼 문제 통계 API
-async function getSolvedAcStats(handle: string) 
-{
-    if (!handle || handle === 'None') return null;
-    try 
-    {
-        const res = await axios.get(`https://solved.ac/api/v3/user/problem_stats?handle=${handle}`);
-        let total = 0;
-        let counts = { Bronze: 0, Silver: 0, Gold: 0, Platinum: 0, Diamond: 0, Ruby: 0 };
-
-        for (const stat of res.data) 
-        {
-            total += stat.solved;
-            if (stat.level >= 1 && stat.level <= 5) counts.Bronze += stat.solved;
-            else if (stat.level >= 6 && stat.level <= 10) counts.Silver += stat.solved;
-            else if (stat.level >= 11 && stat.level <= 15) counts.Gold += stat.solved;
-            else if (stat.level >= 16 && stat.level <= 20) counts.Platinum += stat.solved;
-            else if (stat.level >= 21 && stat.level <= 25) counts.Diamond += stat.solved;
-            else if (stat.level >= 26 && stat.level <= 30) counts.Ruby += stat.solved;
-        }
-        return { total, counts };
-    } 
-    catch (error: any) 
-    {
-        console.error(`[에러] 백준 통계 조회 실패 (${handle}):`, error.message);
-        return null; 
-    }
-}
-
-// 6. ✨ 최종 완성본: 정올 푼 문제 통계 파싱 ✨
-async function getJungolStats(userId: string) 
-{
-    if (!userId || userId === 'None') return null;
-    try 
-    {
-        const url = `https://jungol.co.kr/account/${userId}`;
-        const httpsAgent = new https.Agent({ rejectUnauthorized: false });
-        const response = await axios.get(url, { httpsAgent });
-        const html = response.data;
-
-        // 대장님이 찾아낸 단서 1번의 완벽한 패턴 적용!
-        // <h2 class="..."> 안쪽에 숨겨진 "OO문제" 또는 <!--[-->OO문제<!--]--> 를 정확히 타격합니다.
-        const totalMatch = html.match(/<h2[^>]*>.*?(\d+)문제.*?<\/h2>/) 
-                        || html.match(/<!--\[-->(\d+)문제<!--\]-->/);
-        
-        let total = "확인 불가";
-        if (totalMatch) 
-        {
-            total = totalMatch[1];
-        }
-        
-        return { total };
-    } 
-    catch (error: any) 
-    {
-        console.error(`[에러] 정올 통계 조회 실패 (${userId}):`, error.message);
-        return null;
-    }
-}
-
-// 5. C++ 문법/STL 가이드 데이터
-const cppGuide: Record<string, { title: string, desc: string, code: string }> = {
-    "vector": {
-        title: "std::vector (동적 배열)",
-        desc: "크기가 자유자재로 늘어나는 배열입니다. 메모리를 연속적으로 써서 캐시 효율이 좋습니다.",
-        code: "vector<int> v;\nv.push_back(10);\n\nif (v.size() > 0 and v[0] == 10)\n{\n    cout << \"O(1)\";\n}"
+const cppGuide: Record<string, { title: string; description: string; sample: string }> = {
+    vector: {
+        title: "std::vector",
+        description: "크기가 동적으로 변하는 연속 메모리 배열. 끝에 추가하는 push_back은 분할상환 O(1)입니다.",
+        sample: "#include <vector>\nstd::vector<int> v;\nv.push_back(10);\nif (!v.empty()) { int x = v[0]; }"
     },
-    "map": {
-        title: "std::map (딕셔너리)",
-        desc: "Key-Value 쌍으로 데이터를 저장합니다. 탐색 속도가 빠르고 데이터를 찾을 때 유용합니다.",
-        code: "map<string, int> m;\nm[\"승훈\"] = 1;\n\nif (m.find(\"승훈\") != m.end() or m.size() > 0)\n{\n    cout << \"Found!\";\n}"
+    map: {
+        title: "std::map",
+        description: "키를 정렬해 관리하는 연관 컨테이너. 기본 구현은 균형 이진 탐색 트리로 주요 연산이 O(log N)입니다.",
+        sample: "#include <map>\nstd::map<int, int> cnt;\ncnt[3]++;\nif (cnt.find(3) != cnt.end()) { /* found */ }"
     },
-    "dfs": {
-        title: "DFS (깊이 우선 탐색)",
-        desc: "재귀함수나 스택을 써서 그래프의 끝까지 파고드는 탐색법입니다.",
-        code: "bool visited[100];\n\nvoid dfs(int node)\n{\n    visited[node] = true;\n    \n    if (node == 100 or visited[node] == false)\n    {\n        return;\n    }\n}"
+    dfs: {
+        title: "DFS",
+        description: "깊이 우선 탐색. 방문 여부를 기록하고 인접한 정점을 재귀 또는 스택으로 탐색합니다.",
+        sample: "#include <vector>\nvoid dfs(int u, const std::vector<std::vector<int>>& g, std::vector<bool>& seen)\n{\n    seen[u] = true;\n    for (int v : g[u])\n    {\n        if (!seen[v]) dfs(v, g, seen);\n    }\n}"
     }
 };
 
-// --- [디스코드 봇 이벤트] ---
+const cooldown = new Map<string, number>();
+const cooldownMs = 5000;
+const fence = String.fromCharCode(96).repeat(3);
 
-client.once('clientReady', () => {
-    console.log(`🤖 에닉 2.0 온라인! 로그인 완료: ${client.user?.tag}`);
-    client.user?.setActivity('시스템 관리 가동 중...', { type: 3 });
-});
+function isAllowedChannel(message: Message): boolean {
+    return configuredAccess
+        && message.inGuild()
+        && isAuthorizedSensitiveMessage(message.guildId, message.channelId, allowedGuildId, allowedChannelIds);
+}
 
-client.on('messageCreate', async (message) => {
-    if (message.author.bot) return;
+function display(value: string | null | undefined): string {
+    return (value ?? "미등록").replace(/[@*~|]/g, "_").slice(0, 90);
+}
 
-    if (message.content === '!사용법') 
-    {
-        const helpEmbed = new EmbedBuilder()
-            .setColor('#00ff00')
-            .setTitle('[에닉 2.0 명령어 사용법]')
+function apiFailure(error: unknown): string {
+    if (axios.isAxiosError(error)) {
+        const status = error.response?.status;
+        if (status === 403) return "외부 사이트가 자동 조회를 차단했습니다.";
+        if (status === 429) return "외부 사이트 요청 제한에 걸렸습니다. 잠시 후 다시 시도해 주세요.";
+        if (error.code === "ECONNABORTED") return "외부 서비스 응답 시간이 초과됐습니다.";
+        return "외부 사이트 연결에 실패했습니다.";
+    }
+    return "외부 데이터 해석 중 오류가 발생했습니다.";
+}
+
+async function findStudent(target: string): Promise<Student | null> {
+    const numeric = /^\d{4,5}$/.test(target);
+    if (!numeric && (target.length > 50 || !target)) {
+        throw new Error("이름은 1~50자로 입력해 주세요.");
+    }
+    let query = supabase.from("students")
+        .select("student_id,name,baekjoon_id,solved_ac_tier,jungol_id,jungol_tier");
+    query = numeric ? query.eq("student_id", Number(target)) : query.eq("name", target);
+    const { data, error } = await query.limit(2);
+    if (error) {
+        console.error("[DB] 조회 실패:", error.code);
+        throw new Error("학생 DB 연결에 문제가 있습니다.");
+    }
+    if (!data || data.length === 0) return null;
+    if (data.length > 1) throw new Error("같은 이름의 학생이 여러 명 있습니다. 학번으로 조회해 주세요.");
+    return data[0] as Student;
+}
+
+async function listStudents(): Promise<Student[]> {
+    const { data, error } = await supabase.from("students")
+        .select("student_id,name,baekjoon_id,solved_ac_tier,jungol_id,jungol_tier")
+        .order("student_id", { ascending: true }).limit(60);
+    if (error) {
+        console.error("[DB] 목록 조회 실패:", error.code);
+        throw new Error("학생 목록을 불러올 수 없습니다.");
+    }
+    return (data ?? []) as Student[];
+}
+
+async function solvedTier(handle: string | null): Promise<string | null> {
+    if (!handle || !isSafeHandle(handle)) return null;
+    const response = await http.get<TierResponse>("https://solved.ac/api/v3/user/show", {
+        params: { handle }
+    });
+    if (!Number.isInteger(response.data.tier)) throw new Error("solved.ac 티어 데이터 형식 오류");
+    return tierName(response.data.tier);
+}
+
+async function jungolInfo(id: string | null): Promise<{ tier: string; rank: string; total: string } | null> {
+    if (!id || !/^[A-Za-z0-9_]{1,40}$/.test(id) || id.toLowerCase() === "none") return null;
+    const response = await http.get<string>("https://jungol.co.kr/account/" + encodeURIComponent(id));
+    if (typeof response.data !== "string") return null;
+    const html = response.data;
+    const rawRank = /rank:(\d+)/.exec(html)?.[1];
+    const rawTier = /tier:(\d+)/.exec(html)?.[1];
+    const rawTotal = /<h2[^>]*>[\s\S]*?(\d+)\s*문제[\s\S]*?<\/h2>/.exec(html)?.[1]
+        ?? /<!--\[-->(\d+)\s*문제<!--\]-->/.exec(html)?.[1];
+    return {
+        tier: rawTier ? tierName(Number(rawTier)) : "확인 불가",
+        rank: rawRank ? rawRank + "위" : "확인 불가",
+        total: rawTotal ?? "확인 불가"
+    };
+}
+
+async function recommendation(handle: string | null): Promise<string> {
+    if (!handle || !isSafeHandle(handle)) return "등록된 백준 ID가 없습니다.";
+    const solvedQuery = "solved_by:" + handle;
+    const response = await http.get<SearchResponse>(buildSearchUrl(solvedQuery, 1, "level"));
+    const count = response.data?.count;
+    if (!Number.isSafeInteger(count) || count < 0) return "문제 데이터 형식이 올바르지 않습니다.";
+    if (count === 0) return "해결한 문제가 없어 아직 난도를 추정할 수 없습니다.";
+
+    const rank = recommendationRank(count);
+    const page = Math.floor(rank / 20) + 1;
+    const idx = rank % 20;
+    const pageResponse = page === 1 ? response : await http.get<SearchResponse>(buildSearchUrl(solvedQuery, page, "level"));
+    const anchor = pageResponse.data?.items?.[idx];
+    if (!anchor || !Number.isInteger(anchor.level)) return "추천 기준 난도를 산출할 수 없습니다.";
+
+    for (const level of [anchor.level, Math.min(30, anchor.level + 1)]) {
+        if (level < 1 || level > 30) continue;
+        const query = "tier:" + level + " -solved_by:" + handle;
+        const recResponse = await http.get<SearchResponse>(buildSearchUrl(query));
+        const valid = (recResponse.data?.items ?? []).filter(
+            p => Number.isInteger(p.problemId) && typeof p.titleKo === "string" && Number.isInteger(p.level)
+        );
+        if (valid.length > 0) {
+            const chosen = chooseRandom(valid, 5);
+            const lines = chosen.map(p => "[" + p.problemId + "] "
+                + display(p.titleKo) + " (" + tierName(p.level) + ")"
+                + " https://www.acmicpc.net/problem/" + p.problemId);
+            return "**추천 기준: 상위 해결 문제의 " + tierName(level)
+                + " 난도**\n(통계적 중앙값 아님)\n\n" + lines.join("\n");
+        }
+    }
+    return "해당 난도에서 추천 가능한 미해결 문제를 찾지 못했습니다.";
+}
+
+async function solvedStats(handle: string | null): Promise<string> {
+    if (!handle || !isSafeHandle(handle)) return "백준 ID 미등록";
+    const response = await http.get<StatResponse>("https://solved.ac/api/v3/user/problem_stats", {
+        params: { handle }
+    });
+    if (!Array.isArray(response.data)) throw new Error("solved.ac 통계 응답 형식 오류");
+    const buckets = [0, 0, 0, 0, 0, 0];
+    let total = 0;
+    for (const stat of response.data) {
+        if (!Number.isInteger(stat.level) || !Number.isInteger(stat.solved) || stat.solved < 0) continue;
+        total += stat.solved;
+        if (stat.level >= 1 && stat.level <= 30) {
+            const index = Math.floor((stat.level - 1) / 5);
+            buckets[index] = (buckets[index] ?? 0) + stat.solved;
+        }
+    }
+    return "총 해결: " + total + "문제\nBronze " + buckets[0] + " · Silver " + buckets[1]
+        + " · Gold " + buckets[2] + " · Platinum " + buckets[3]
+        + " · Diamond " + buckets[4] + " · Ruby " + buckets[5];
+}
+
+async function replyHelp(message: Message): Promise<void> {
+    await message.reply({
+        embeds: [new EmbedBuilder().setColor(0x3b82f6).setTitle("O(1) 에닉 2.0 사용법")
+            .setDescription("학생 조회 기능은 허가된 동아리 서버·채널에서만 이용 가능합니다.")
             .addFields(
-                { name: '`!조회 [이름/학번]`', value: '부원의 백준/정올 실시간 티어와 정보를 조회합니다.' },
-                { name: '`!문제추천 [이름/학번]`', value: '맞춤 문제를 5개 추천합니다. (API 차단 시 오류 발생 가능)' },
-                { name: '`!통계 [이름/학번]`', value: '백준 티어별 해결 개수 및 정올 통계를 분석합니다.' },
-                { name: '`!문법 [키워드]`', value: 'C++ 핵심 문법 가이드 제공 (예: `vector`, `map`, `dfs`)' }
+                { name: "!조회 [이름/학번]", value: "백준·정올 프로필 및 티어 조회" },
+                { name: "!문제추천 [이름/학번] 또는 !추천", value: "미해결 문제 최대 5개 추천" },
+                { name: "!통계 [이름/학번]", value: "플랫폼별 풀이 통계" },
+                { name: "!전체목록", value: "등록 부원 목록 (저장된 티어)" },
+                { name: "!랭킹", value: "백준 티어 기반 동아리 랭킹 (저장된 값)" },
+                { name: "!문법 [vector/map/dfs]", value: "간단한 C++ 문법 예시" }
+            )]
+    });
+}
+
+client.once(Events.ClientReady, () => {
+    console.log("Enikk 2.0 로그인 성공");
+    client.user?.setActivity("O(1) 알고리즘 학습");
+});
+
+client.on(Events.MessageCreate, async (message: Message) => {
+    if (message.author.bot) return;
+    const cmd = parseCommand(message.content);
+    if (!cmd) return;
+    const recognized = new Set(["!사용법", "!문법", "!조회", "!문제추천", "!추천", "!통계", "!전체목록", "!랭킹"]);
+    if (!recognized.has(cmd.name)) return;
+
+    // 누구에게나 허용되는 공개 학습 도움말과 학생 데이터 명령을 분리한다.
+    const sensitive = !["!사용법", "!문법"].includes(cmd.name);
+    if (sensitive && !isAllowedChannel(message)) {
+        await message.reply("이 명령은 지정된 O(1) 동아리 채널에서만 이용할 수 있습니다.");
+        return;
+    }
+
+    const now = Date.now();
+    const previous = cooldown.get(message.author.id) ?? 0;
+    if (now - previous < cooldownMs) return;
+    if (cooldown.size > 1000) cooldown.clear();
+    cooldown.set(message.author.id, now);
+
+    let pending: Message | null = null;
+    try {
+        if (cmd.name === "!사용법") {
+            await replyHelp(message);
+            return;
+        }
+        if (cmd.name === "!문법") {
+            const key = cmd.target.toLowerCase();
+            const guide = cppGuide[key];
+            if (!guide) {
+                await message.reply("지원하는 문법: vector, map, dfs");
+                return;
+            }
+            const embed = new EmbedBuilder().setColor(0xeab308)
+                .setTitle("C++ 가이드: " + guide.title)
+                .setDescription(guide.description)
+                .addFields({ name: "예제", value: fence + "cpp\n" + guide.sample + "\n" + fence });
+            await message.reply({ embeds: [embed] });
+            return;
+        }
+
+        if (cmd.name === "!전체목록" || cmd.name === "!랭킹") {
+            pending = await message.reply("🔍 동아리 목록을 불러오는 중...");
+            const students = await listStudents();
+            if (students.length === 0) {
+                await pending.edit("등록된 학생이 없습니다.");
+                return;
+            }
+            if (cmd.name === "!랭킹") {
+                students.sort((a, b) => tierScore(b.solved_ac_tier) - tierScore(a.solved_ac_tier));
+            }
+            const list = students.map((s, i) =>
+                (i + 1) + ". " + display(s.name) + " — " + display(s.solved_ac_tier)
             );
-        
-        message.reply({ embeds: [helpEmbed] });
-        return;
-    }
-
-    const args = message.content.split(' ');
-    const cmd = args[0];
-
-    if (cmd === '!문법') 
-    {
-        if (args.length < 2) 
-        {
-            message.reply("검색할 키워드를 입력해 주십시오. (현재 지원: `vector`, `map`, `dfs`)");
-            return;
-        }
-        const keyword = args[1].toLowerCase();
-        if (cppGuide[keyword]) 
-        {
-            const guideEmbed = new EmbedBuilder()
-                .setColor('#ffcc00')
-                .setTitle(`📘 O(1) C++ 가이드: ${cppGuide[keyword].title}`)
-                .setDescription(cppGuide[keyword].desc)
-                .addFields({ name: '💻 코드 예시', value: `\`\`\`cpp\n${cppGuide[keyword].code}\n\`\`\`` });
-            message.reply({ embeds: [guideEmbed] });
-        } 
-        else 
-        {
-            message.reply("등록되지 않은 문법입니다.");
-        }
-        return;
-    }
-
-    const isLookup = cmd === '!조회';
-    const isRecommend = cmd === '!문제추천';
-    const isStat = cmd === '!통계';
-
-    if (!isLookup && !isRecommend && !isStat) return;
-
-    if (args.length < 2) 
-    {
-        message.reply(`명령어가 잘못되었습니다. (예: \`${cmd} 승훈\` 또는 \`${cmd} 1234\`)`);
-        return;
-    }
-    const targetQuery = args[1];
-
-    try 
-    {
-        const waitMsg = await message.reply(`🔍 DB에서 **${targetQuery}** 데이터를 불러오는 중...`);
-
-        const isNumeric = /^\d+$/.test(targetQuery);
-        let dbQuery = supabase.from('students').select('*');
-        
-        if (isNumeric) 
-        {
-            dbQuery = dbQuery.eq('student_id', parseInt(targetQuery));
-        } 
-        else 
-        {
-            dbQuery = dbQuery.eq('name', targetQuery);
-        }
-
-        const { data: students, error } = await dbQuery;
-
-        if (error || !students || students.length === 0) 
-        {
-            await waitMsg.edit(`❌ DB에서 **${targetQuery}** 학생을 찾을 수 없습니다.`);
+            const embed = new EmbedBuilder().setColor(0x10b981)
+                .setTitle(cmd.name === "!랭킹" ? "O(1) 동아리 백준 랭킹" : "O(1) 동아리 학생 목록")
+                .setDescription(list.join("\n").slice(0, 3800))
+                .setFooter({ text: "DB 저장 티어 기준 · 외부 API 실시간 순위가 아닙니다." });
+            await pending.edit({ content: "조회 완료.", embeds: [embed] });
             return;
         }
 
-        const student = students[0];
+        if (!cmd.target) {
+            await message.reply("이름 또는 학번을 입력해 주세요. 예: !조회 1234");
+            return;
+        }
 
-        if (isLookup) 
-        {
-            const [bjTier, jungolData] = await Promise.all([
-                getSolvedAcTier(student.baekjoon_id),
-                scrapeJungolProfile(student.jungol_id)
+        pending = await message.reply("🔍 요청을 처리하고 있습니다...");
+        const student = await findStudent(cmd.target);
+        if (!student) {
+            await pending.edit("등록된 학생을 찾을 수 없습니다.");
+            return;
+        }
+
+        if (cmd.name === "!조회") {
+            const [tierResult, jungolResult] = await Promise.allSettled([
+                solvedTier(student.baekjoon_id),
+                jungolInfo(student.jungol_id)
             ]);
-
-            const jgTier = jungolData ? `${jungolData.tierStr} (${jungolData.rankStr})` : "미연동 또는 비공개";
-
-            const profileEmbed = new EmbedBuilder()
-                .setColor('#0099ff')
-                .setTitle(`🏆 O(1) 부원 정보: ${student.name}`)
-                .setDescription(`학번: ${student.student_id} | 나이: ${student.age} | 성별: ${student.gender}`)
+            const tier = tierResult.status === "fulfilled" && tierResult.value
+                ? tierResult.value : "실시간 확인 실패 (저장값: " + display(student.solved_ac_tier) + ")";
+            const jungol = jungolResult.status === "fulfilled" ? jungolResult.value : null;
+            const bjLink = student.baekjoon_id && isSafeHandle(student.baekjoon_id)
+                ? "https://solved.ac/profile/" + encodeURIComponent(student.baekjoon_id) : "미등록";
+            const jgLink = student.jungol_id && isSafeHandle(student.jungol_id)
+                ? "https://jungol.co.kr/account/" + encodeURIComponent(student.jungol_id) : "미등록";
+            const embed = new EmbedBuilder().setColor(0x3b82f6)
+                .setTitle("O(1) 프로필: " + display(student.name))
+                // 나이·성별·학번 등 불필요한 개인정보는 Discord에 표시하지 않는다.
                 .addFields(
-                    { name: '백준 (Solved.ac)', value: `**${bjTier}**\n[프로필 보기](https://solved.ac/profile/${student.baekjoon_id})`, inline: true },
-                    { name: '정올 (JUNGOL)', value: `**${jgTier}**\n[프로필 보기](https://jungol.co.kr/account/${student.jungol_id})`, inline: true }
+                    { name: "백준 (solved.ac)", value: tier + "\n" + bjLink },
+                    { name: "정올 (JUNGOL)", value: (jungol ? jungol.tier + " · " + jungol.rank : "조회 불가/미등록") + "\n" + jgLink }
                 )
-                .setFooter({ text: 'Powered by Enik 2.0 & O(1) Admin System' })
-                .setTimestamp();
-
-            await waitMsg.edit({ content: "조회 완료.", embeds: [profileEmbed] });
-        } 
-        else if (isRecommend) 
-        {
-            const recommendation = await getRecommendedProblems(student.baekjoon_id);
-            
-            const recEmbed = new EmbedBuilder()
-                .setColor('#ff9900')
-                .setTitle(`📚 ${student.name} 맞춤형 문제 추천`)
-                .setDescription(recommendation)
-                .setFooter({ text: '열심히 하십시오.' });
-
-            await waitMsg.edit({ content: "추천 완료.", embeds: [recEmbed] });
+                .setFooter({ text: "외부 API 오류는 저장된 DB 티어와 구분해 표시합니다." });
+            await pending.edit({ content: "조회 완료.", embeds: [embed] });
+            return;
         }
-        else if (isStat) 
-        {
-            const [bjStats, jgStats] = await Promise.all([
-                getSolvedAcStats(student.baekjoon_id),
-                getJungolStats(student.jungol_id)
+
+        if (cmd.name === "!문제추천" || cmd.name === "!추천") {
+            let result: string;
+            try {
+                result = await recommendation(student.baekjoon_id);
+            } catch (error) {
+                result = apiFailure(error);
+            }
+            const embed = new EmbedBuilder().setColor(0xf59e0b)
+                .setTitle(display(student.name) + " 맞춤 문제 추천")
+                .setDescription(result.slice(0, 3900));
+            await pending.edit({ content: "추천 결과", embeds: [embed] });
+            return;
+        }
+
+        if (cmd.name === "!통계") {
+            const [bj, jg] = await Promise.allSettled([
+                solvedStats(student.baekjoon_id),
+                jungolInfo(student.jungol_id)
             ]);
-
-            const statEmbed = new EmbedBuilder()
-                .setColor('#9900ff')
-                .setTitle(`📊 ${student.name} 학생 통합 풀이 통계`)
-                .setFooter({ text: '꾸준함이 실력입니다.' });
-
-            if (bjStats) 
-            {
-                statEmbed.addFields(
-                    { name: '🔥 백준 (Solved.ac)', value: `총 해결: **${bjStats.total}**문제\n(🟤${bjStats.counts.Bronze} ⚪${bjStats.counts.Silver} 🟡${bjStats.counts.Gold} 🟢${bjStats.counts.Platinum} 🔵${bjStats.counts.Diamond} 🔴${bjStats.counts.Ruby})`, inline: false }
+            const solved = bj.status === "fulfilled" ? bj.value : apiFailure(bj.reason);
+            const jungol = jg.status === "fulfilled" && jg.value ? jg.value.total : "확인 불가";
+            const embed = new EmbedBuilder().setColor(0xa855f7)
+                .setTitle(display(student.name) + " 풀이 통계")
+                .addFields(
+                    { name: "백준", value: solved },
+                    { name: "정올", value: "확인된 해결 문제: " + jungol }
                 );
-            } 
-            else 
-            {
-                statEmbed.addFields({ name: '🔥 백준 (Solved.ac)', value: "미연동 또는 통계 조회 실패", inline: false });
-            }
-
-            if (jgStats && jgStats.total !== "확인 불가") 
-            {
-                statEmbed.addFields(
-                    { name: '🚀 정올 (JUNGOL)', value: `총 해결: **${jgStats.total}**문제\n(정올은 자체 API 미지원으로 세부 티어 파싱이 생략되었습니다.)`, inline: false }
-                );
-            } 
-            else 
-            {
-                statEmbed.addFields({ name: '🚀 정올 (JUNGOL)', value: "미연동 또는 비공개", inline: false });
-            }
-
-            await waitMsg.edit({ content: "통계 분석 완료.", embeds: [statEmbed] });
+            await pending.edit({ content: "통계 조회 결과", embeds: [embed] });
         }
-
-    } 
-    catch (error: any) 
-    {
-        console.error("[치명적 에러 발생]:", error.message);
-        message.reply("서버에 일시적인 오류가 발생했습니다. (대장님, 터미널 로그를 확인해 주세요!)");
+    } catch (error) {
+        console.error("[Enikk] 명령 처리 실패:", error instanceof Error ? error.message : "Unknown error");
+        const notice = error instanceof Error && (
+            error.message.startsWith("이름은") || error.message.startsWith("같은 이름")
+        ) ? error.message : "처리 중 문제가 발생했습니다. 관리자에게 확인해 주세요.";
+        try {
+            if (pending) await pending.edit(notice);
+            else await message.reply(notice);
+        } catch {
+            console.error("[Enikk] Discord 오류 안내 전송 실패");
+        }
     }
 });
 
-client.login(DISCORD_TOKEN);
+void client.login(discordToken).catch(error => {
+    console.error("[Enikk] Discord 로그인 실패:", error instanceof Error ? error.message : "Unknown error");
+    process.exitCode = 1;
+});
